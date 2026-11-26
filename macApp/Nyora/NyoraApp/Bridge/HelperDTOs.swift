@@ -181,7 +181,7 @@ struct HelperHistoryRow: Decodable, Identifiable, Hashable {
     let mangaId: String
     let mangaUrl: String
     let mangaTitle: String
-    let mangaCoverUrl: String
+    var mangaCoverUrl: String
     let sourceId: String
     let sourceName: String
     let chapterId: String
@@ -208,7 +208,7 @@ struct HelperBookmark: Decodable, Identifiable, Hashable {
     let id: Int64
     let mangaId: String
     let mangaTitle: String
-    let mangaCoverUrl: String
+    var mangaCoverUrl: String
     let chapterId: String
     let chapterTitle: String
     let page: Int
@@ -227,7 +227,7 @@ struct HelperUpdatesResponse: Decodable {
 struct HelperUpdate: Decodable, Identifiable, Hashable {
     let mangaId: String
     let mangaTitle: String
-    let mangaCoverUrl: String
+    var mangaCoverUrl: String
     let sourceId: String
     let newChapters: Int
     let totalChapters: Int
