@@ -320,6 +320,13 @@ actor NyoraHelperBridge {
 
     func imageProxyURL(for page: HelperImagePage) -> URL? {
         guard let base = baseUrl else { return nil }
+        // Current engine builds already return a URL that points at the helper's own
+        // `/image?u=…` proxy. Wrapping that again makes the helper reject it as
+        // "Invalid image URL" (it refuses loopback targets), so every page fails to load.
+        if let existing = URL(string: page.url),
+           existing.host == base.host, existing.port == base.port, existing.path == "/image" {
+            return existing
+        }
         var components = URLComponents(url: base.appendingPathComponent("image"), resolvingAgainstBaseURL: false)
         var items = [URLQueryItem(name: "u", value: page.url)]
         for (k, v) in page.headers {
