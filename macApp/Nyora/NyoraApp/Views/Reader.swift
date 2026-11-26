@@ -445,6 +445,9 @@ struct WebtoonReaderV2: View {
     let chapter: ChapterSummary
     let controlsVisible: Bool
     var onToggleChrome: () -> Void = {}
+    /// The floating panel passes `false` so the reader never claims keyboard focus
+    /// (typing must keep going to whatever app the user is working in).
+    var takesKeyboardFocus: Bool = true
 
     @EnvironmentObject var appState: AppState
     @FocusState private var focused: Bool
@@ -458,7 +461,8 @@ struct WebtoonReaderV2: View {
     @State private var autoTask: Task<Void, Never>? = nil
 
     /// Snapshot of scroll offset + travel, tracked via onScrollGeometryChange.
-    private struct AutoGeo: Equatable { var y: CGFloat; var maxY: CGFloat }
+    private struct AutoGeo: Equatable { var y: CGFloat; var maxY: CGFloat; var contentH: CGFloat }
+    @State private var contentH: CGFloat = 0
 
     var body: some View {
         GeometryReader { geo in
@@ -513,10 +517,19 @@ struct WebtoonReaderV2: View {
                     .scrollPosition($scrollPosition)
                     .onScrollGeometryChange(for: AutoGeo.self) { geo in
                         AutoGeo(y: geo.contentOffset.y,
-                                maxY: max(0, geo.contentSize.height - geo.containerSize.height))
+                                maxY: max(0, geo.contentSize.height - geo.containerSize.height),
+                                contentH: geo.contentSize.height)
                     } action: { _, g in
                         scrollY = g.y
                         maxScrollY = g.maxY
+                        contentH = g.contentH
+                        // Remember where we are (as a fraction) for the floating-panel
+                        // handoff — but not while a restore is pending, or the fresh
+                        // reader's initial offset 0 would overwrite the saved position.
+                        if appState.readerRestoreChapterId != chapter.id, g.contentH > 0 {
+                            appState.readerScrollProgress = Double(g.y / g.contentH)
+                            appState.readerScrollProgressChapterId = chapter.id
+                        }
                     }
                     // Fresh scroll view per chapter — otherwise the old scroll offset
                     // carries over and the page onAppear snaps you to the middle.
@@ -525,10 +538,39 @@ struct WebtoonReaderV2: View {
                         on ? startAutoScroll() : stopAutoScroll()
                     }
                     .onAppear {
+                        // Floating-panel handoff? Then the page to resume is the one saved
+                        // at pop-out/return — NOT `readerPageIndex`, which a narrow panel's
+                        // first visible rows overwrite before the delayed jump runs.
+                        let restoring = appState.readerRestoreChapterId == chapter.id
+                        let startPage = restoring ? appState.readerRestorePage : appState.readerPageIndex
                         // Jump to saved position
-                        if appState.readerPageIndex > 0 {
+                        if startPage > 0 {
+                            if restoring { appState.readerPageIndex = startPage }
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                proxy.scrollTo(appState.readerPageIndex, anchor: .top)
+                                proxy.scrollTo(startPage, anchor: .top)
+                            }
+                        }
+                        if restoring {
+                            let containerH = geo.size.height
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                // Refine to the exact in-page spot from the saved scroll
+                                // fraction, but only if that fraction was captured from THIS
+                                // chapter and lands within ~a screen of the page top we just
+                                // jumped to. Fractions of LazyVStack's estimated heights can
+                                // be far off; then the page-top landing is the right answer.
+                                if appState.readerScrollProgressChapterId == chapter.id {
+                                    let target = CGFloat(appState.readerScrollProgress) * contentH
+                                    if target > 0, abs(target - scrollY) < containerH * 1.5 {
+                                        scrollPosition.scrollTo(y: target)
+                                        scrollY = target   // seed auto-scroll's starting offset
+                                    }
+                                }
+                                if appState.readerRestoreChapterId == chapter.id {
+                                    appState.readerRestoreChapterId = nil
+                                }
+                                // Auto-scroll was held back in the outer onAppear so it
+                                // could not run from offset 0 over the restore.
+                                if appState.autoScrollOn { startAutoScroll() }
                             }
                         }
                     }
@@ -546,10 +588,15 @@ struct WebtoonReaderV2: View {
                 }
             }
         }
-        .focusable()
+        .focusable(takesKeyboardFocus)
         .focused($focused)
         .focusEffectDisabled()
-        .onAppear { focused = true; if appState.autoScrollOn { startAutoScroll() } }
+        .onAppear {
+            focused = takesKeyboardFocus
+            // While a floating-panel restore is pending, the restore closure starts
+            // auto-scroll itself once the position is settled.
+            if appState.autoScrollOn, appState.readerRestoreChapterId != chapter.id { startAutoScroll() }
+        }
         .onDisappear { stopAutoScroll() }
         // New chapter loaded — re-arm the end-of-chapter auto-continue and, if
         // auto-scroll is still on, restart the loop from the top of the new chapter.

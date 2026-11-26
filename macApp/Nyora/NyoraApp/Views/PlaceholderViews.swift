@@ -834,7 +834,10 @@ struct ReaderView: View {
 
     var body: some View {
         Group {
-            if let chapter = appState.activeChapter, !chapter.pages.isEmpty {
+            if appState.isReaderFloating {
+                // The chapter is in the floating panel; keep exactly one reader alive.
+                ReaderFloatingPlaceholder()
+            } else if let chapter = appState.activeChapter, !chapter.pages.isEmpty {
                 ZStack(alignment: .bottom) {
                     // Immersive page content — full-bleed, no window toolbar.
                     Group {
@@ -982,6 +985,9 @@ struct ReaderView: View {
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .help(appState.autoScrollOn ? "Stop auto-scroll (A)" : "Auto-scroll (A) — hold for speed")
+
+            barIcon("pip.enter") { appState.popOutReader() }
+                .help("Pop out to floating window")
 
             Menu {
                 Button { appState.translateCurrentPage() } label: {

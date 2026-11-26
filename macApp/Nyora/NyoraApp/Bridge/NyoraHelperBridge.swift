@@ -75,6 +75,46 @@ actor NyoraHelperBridge {
     private var stateHandler: (@Sendable (HelperState) async -> Void)?
     private let launcher = HelperLauncher()
 
+    // MARK: Canonical covers
+    // The list/search cover of a manga is remembered and reused everywhere else (details,
+    // favourites, history, updates, bookmarks) — see CoverStore for why.
+    private var covers = CoverStore(
+        fileURL: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Nyora/cover-cache.json"))
+    private var coverSaveTask: Task<Void, Never>?
+
+    /// Remembers the covers of a list/search result (the list cover is the canonical one).
+    private func rememberCovers(_ list: [HelperManga]) {
+        var changed = false
+        for manga in list where covers.record(id: manga.id, cover: manga.coverUrl) { changed = true }
+        if changed { scheduleCoverSave() }
+    }
+
+    private func scheduleCoverSave() {
+        coverSaveTask?.cancel()
+        coverSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.flushCovers()
+        }
+    }
+
+    private func flushCovers() { covers.save() }
+
+    /// The remembered list cover for `id`, or `fallback` when this manga was never seen in a list.
+    private func canonicalCover(id: String, fallback: String) -> String {
+        guard let base = baseUrl else { return fallback }
+        return covers.canonical(id: id, base: base) ?? fallback
+    }
+
+    private func withCanonicalCovers(_ list: [HelperManga]) -> [HelperManga] {
+        list.map { manga in
+            var m = manga
+            m.coverUrl = canonicalCover(id: manga.id, fallback: manga.coverUrl)
+            return m
+        }
+    }
+
     // MARK: Lifecycle
 
     func start(onStateChange handler: @Sendable @escaping (HelperState) async -> Void) async {
@@ -165,7 +205,11 @@ actor NyoraHelperBridge {
 
     func history(limit: Int = 100) async throws -> [HelperHistoryRow] {
         let response: HelperHistoryResponse = try await get("/library/history?limit=\(limit)")
-        return response.entries
+        return response.entries.map { row in
+            var r = row
+            r.mangaCoverUrl = canonicalCover(id: row.mangaId, fallback: row.mangaCoverUrl)
+            return r
+        }
     }
 
     func recordHistory(mangaId: String, sourceId: String, chapterId: String, chapterTitle: String, page: Int, percent: Float) async throws {
@@ -191,7 +235,7 @@ actor NyoraHelperBridge {
 
     func favourites() async throws -> [HelperManga] {
         let response: HelperFavouritesResponse = try await get("/library/favourites")
-        return response.entries
+        return withCanonicalCovers(response.entries)
     }
 
     func isFavourited(mangaId: String) async throws -> Bool {
@@ -208,7 +252,11 @@ actor NyoraHelperBridge {
 
     func bookmarks() async throws -> [HelperBookmark] {
         let response: HelperBookmarksResponse = try await get("/library/bookmarks")
-        return response.entries
+        return response.entries.map { row in
+            var r = row
+            r.mangaCoverUrl = canonicalCover(id: row.mangaId, fallback: row.mangaCoverUrl)
+            return r
+        }
     }
 
     func addBookmark(mangaId: String, chapterId: String, chapterTitle: String, page: Int, note: String = "") async throws {
@@ -238,7 +286,11 @@ actor NyoraHelperBridge {
 
     func updates() async throws -> [HelperUpdate] {
         let response: HelperUpdatesResponse = try await get("/library/updates")
-        return response.entries
+        return response.entries.map { row in
+            var r = row
+            r.mangaCoverUrl = canonicalCover(id: row.mangaId, fallback: row.mangaCoverUrl)
+            return r
+        }
     }
 
     func refreshUpdates() async throws -> HelperUpdatesRefreshResult {
@@ -271,6 +323,7 @@ actor NyoraHelperBridge {
         let response: HelperBrowseResponse = try await get(
             "/sources/popular?id=\(sourceId.urlEscaped)&page=\(page)"
         )
+        rememberCovers(response.entries)
         return response.entries.map { MangaSummary($0, sourceName: sourceId) }
     }
 
@@ -278,6 +331,7 @@ actor NyoraHelperBridge {
         let response: HelperBrowseResponse = try await get(
             "/sources/latest?id=\(sourceId.urlEscaped)&page=\(page)"
         )
+        rememberCovers(response.entries)
         return response.entries.map { MangaSummary($0, sourceName: sourceId) }
     }
 
@@ -285,6 +339,7 @@ actor NyoraHelperBridge {
         let response: HelperBrowseResponse = try await get(
             "/sources/search?id=\(sourceId.urlEscaped)&q=\(query.urlEscaped)&page=\(page)"
         )
+        rememberCovers(response.entries)
         return response.entries.map { MangaSummary($0, sourceName: sourceId) }
     }
 
@@ -298,15 +353,20 @@ actor NyoraHelperBridge {
         let response: HelperBrowseResponse = try await get(
             "/sources/search?id=\(sourceId.urlEscaped)&q=\(query.urlEscaped)&page=\(page)"
         )
+        rememberCovers(response.entries)
         return response.entries
     }
 
     // MARK: Details + pages
 
     func details(sourceId: String, mangaUrl: String) async throws -> HelperDetailsResponse {
-        return try await get(
+        var response: HelperDetailsResponse = try await get(
             "/manga/details?id=\(sourceId.urlEscaped)&url=\(mangaUrl.urlEscaped)"
         )
+        // The details cover often differs from the list cover (og:image card, other crop,
+        // or empty) — keep the list cover the user clicked on.
+        response.manga.coverUrl = canonicalCover(id: response.manga.id, fallback: response.manga.coverUrl)
+        return response
     }
 
     func pages(sourceId: String, chapterUrl: String) async throws -> [HelperImagePage] {
@@ -320,6 +380,13 @@ actor NyoraHelperBridge {
 
     func imageProxyURL(for page: HelperImagePage) -> URL? {
         guard let base = baseUrl else { return nil }
+        // Current engine builds already return a URL that points at the helper's own
+        // `/image?u=…` proxy. Wrapping that again makes the helper reject it as
+        // "Invalid image URL" (it refuses loopback targets), so every page fails to load.
+        if let existing = URL(string: page.url),
+           existing.host == base.host, existing.port == base.port, existing.path == "/image" {
+            return existing
+        }
         var components = URLComponents(url: base.appendingPathComponent("image"), resolvingAgainstBaseURL: false)
         var items = [URLQueryItem(name: "u", value: page.url)]
         for (k, v) in page.headers {
@@ -404,7 +471,7 @@ actor NyoraHelperBridge {
         let response: HelperFavouritesResponse = try await get(
             "/library/favourites?categoryId=\(categoryId)"
         )
-        return response.entries
+        return withCanonicalCovers(response.entries)
     }
 
     // MARK: Downloads
@@ -474,7 +541,9 @@ actor NyoraHelperBridge {
     func globalSearch(query: String) async throws -> HelperGlobalSearchResponse {
         // Global search fans out across the whole curated catalogue server-side,
         // so give the request a long timeout — it must not be aborted mid-search.
-        return try await get("/search/global?q=\(query.urlEscaped)", timeout: 600)
+        let response: HelperGlobalSearchResponse = try await get("/search/global?q=\(query.urlEscaped)", timeout: 600)
+        for group in response.groups { rememberCovers(group.entries) }
+        return response
     }
 
     // MARK: Stats / suggestions / alternatives
@@ -544,6 +613,7 @@ actor NyoraHelperBridge {
             q += "&f=\(json.urlEscaped)"
         }
         let response: HelperBrowseResponse = try await get(q)
+        rememberCovers(response.entries)
         return response.entries.map { MangaSummary($0, sourceName: sourceId) }
     }
 

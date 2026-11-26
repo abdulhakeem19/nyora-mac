@@ -809,6 +809,47 @@ final class AppState: ObservableObject {
     /// play/pause chrome button and the reader loops react live.
     @Published var autoScrollOn: Bool = false
     func toggleAutoScroll() { autoScrollOn.toggle() }
+
+    // MARK: Floating reader (picture-in-picture style panel)
+    /// True while the current chapter is shown in the floating panel instead of
+    /// the main window. Cleared by `FloatingReaderController.windowWillClose`.
+    @Published var isReaderFloating: Bool = false
+    lazy var floatingReader = FloatingReaderController(appState: self)
+    /// Scroll offset as a fraction of content height, written by the webtoon reader on
+    /// every scroll frame — deliberately NOT @Published (would re-render the app per frame).
+    /// Fractions survive the width change between main window and panel; raw pixels don't.
+    var readerScrollProgress: Double = 0
+    /// Chapter that `readerScrollProgress` was captured from (only a webtoon reader writes
+    /// it). A restore refines only when this matches, so a fraction from another chapter
+    /// or reading mode is never applied.
+    var readerScrollProgressChapterId: String?
+    /// Chapter whose scroll position the next-appearing webtoon reader should restore
+    /// (set on pop-out / return). Keyed by chapter id so a pending restore is never
+    /// applied to a different chapter.
+    var readerRestoreChapterId: String?
+    /// Page to resume at for that restore. Saved separately because `readerPageIndex`
+    /// is overwritten by the new reader's first visible rows before the jump runs.
+    var readerRestorePage: Int = 0
+    /// Moves the current chapter into the floating panel (no-op with no chapter open).
+    func popOutReader() {
+        guard activeChapter?.pages.isEmpty == false else { return }
+        readerRestoreChapterId = activeChapter?.id
+        readerRestorePage = readerPageIndex
+        isReaderFloating = true
+        floatingReader.show()
+    }
+    /// Closes the floating panel (`windowWillClose` does the cleanup) and brings the main
+    /// window forward — Nyora is not the active app while the panel floats, so without
+    /// this the main window can stay buried behind the user's work app.
+    func returnReaderToMain() {
+        floatingReader.close()
+        NSApp.activate(ignoringOtherApps: true)
+        let main = NSApp.windows.first {
+            !($0 is NSPanel) && $0.canBecomeMain && $0.level == .normal && ($0.isVisible || $0.isMiniaturized)
+        }
+        if main?.isMiniaturized == true { main?.deminiaturize(nil) }
+        main?.makeKeyAndOrderFront(nil)
+    }
     /// Webtoon continuous speed: 24 … 258 px/sec across levels 1…10.
     var autoScrollPxPerSec: Double { 24 + Double(readerPrefs.autoScrollLevel - 1) * 26 }
     /// Paged auto-advance delay: ~8.7s … 1.7s across levels 1…10.
